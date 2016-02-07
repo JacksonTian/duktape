@@ -34,3 +34,4 @@
 - Detach
 - DumpHeap
 - GetBytecode
+- InspectHeapObject
