@@ -1735,6 +1735,210 @@ target endianness and interpret the bytecode based on that.
 .. note:: This command is somewhat incomplete at the moment and may be modified
    once the best way to do this in the debugger UI has been figured out.
 
+InspectHeapObject (0x22)
+------------------------
+
+Format::
+
+    REQ <int: 0x22> <tval: heapptr> <uint: flags> EOM
+    REP [ <property> ]* EOM
+
+Inspect a heap object using the provided heap pointer.  The debug client is
+responsible for ensuring that the pointer is not stale by either making sure
+the target object is still reachable, or by using the heap locking mechanism.
+
+The request flags control what information is provided:
+
+* FIXME: provide control flag to e.g. include or exclude value stack?
+
+The result is a list of property names and values.  The list includes:
+
+* The target object's "own" properties, i.e. properties which are conceptually
+  part of the target object's property table.  Property attributes are provided
+  explicitly.  Accessor properties are described as is without invoking the
+  getter (the debug client can do that explicitly if it so desires).
+
+  - FIXME: should e.g. String object's virtual index properties be included,
+    or should this actually just contain the internal property table directly?
+
+* Artificial properties (explicitly marked as such) which are Duktape internal
+  fields and are not actual object properties.  Artificial properties include
+  e.g. ``duk_heaphdr`` flags.  Providing these fields as artificial properties
+  makes the protocol format more easily versionable (compared to providing all
+  the internal flags as is).
+
+Each property is described using the following sequence of dvalues:
+
+* Flags field, a bit mask (described below)
+
+* Key
+
+* Property value:
+
+  - If property is not an accessor: single dvalue representing a duk_tval
+
+  - If property is an accessor: two dvalues pointing to getter and setter
+    functions (respectively)
+
+The flags field is an unsigned integer bitmask with the following bits:
+
++---------+-----------------------------------------------------------------+
+| Bitmask | Description                                                     |
++=========+=================================================================+
+| 0x01    | Property attribute: writable, matches                           |
+|         | DUK_PROPDESC_FLAG_WRITABLE.                                     |
++---------+-----------------------------------------------------------------+
+| 0x02    | Property attribute: enumerable,                                 |
+|         | matches DUK_PROPDESC_FLAG_ENUMERABLE.                           |
++---------+-----------------------------------------------------------------+
+| 0x04    | Property attribute: configurable, matches                       |
+|         | DUK_PROPDESC_FLAG_CONFIGURABLE.                                 |
++---------+-----------------------------------------------------------------+
+| 0x08    | Property attribute: accessore, matches                          |
+|         | DUK_PROPDESC_FLAG_ACCESSOR.                                     |
++---------+-----------------------------------------------------------------+
+| 0x10    | Property is virtual (used internally but should never actually  |
+|         | appear in debug protocol), matches DUK_PROPDESC_FLAG_VIRTUAL.   |
++---------+-----------------------------------------------------------------+
+| 0x100   | Property is artificial, e.g. ``duk_heaphdr`` fields mapped into |
+|         | properties for easier versioning.                               |
++---------+-----------------------------------------------------------------+
+
+Artificial properties have the "artificial" flag set which distinguishes them
+unambiguously from other properties, including internal and virtual properties.
+The following keys are used (this set may change with Duktape version):
+
+* ``htype``: ``duk_heaphdr`` type field, ``DUK_HTYPE_xxx`.
+
+* ``refcount``: reference count, missing if no refcount support.
+
+* ``heaphdr_flags``: raw ``duk_heaphdr`` flags field; the individual flags
+  are also decoded separately.
+
+FIXME: heaphdr flag decoding; all objects:
+
+* ``reachable``
+
+* ``temproot``
+
+* ``finalizable``
+
+* ``finalized``
+
+* ``readonly``
+
+FIXME: strings:
+
+* ``arridx``
+
+* ``internal``
+
+* ``reserved_word``
+
+* ``strict_reserverd_word``
+
+* ``eval_or_arguments``
+
+* ``extdata``
+
+FIXME: buffers:
+
+* ``dynamic``
+
+* ``external``
+
+FIXME: objects
+
+* ``extensible``
+
+* ``constructable``
+
+* ``bound``
+
+* ``compiledfunction``
+
+* ``nativefunction``
+
+* ``bufferobject``
+
+* ``thread``
+
+* ``array_part``
+
+* ``strict``
+
+* ``notail``
+
+* ``newenv``
+
+* ``namebinding``
+
+* ``createargs``
+
+* ``envrecclosed``
+
+* ``exotic_array``
+
+* ``exotic_stringobj``
+
+* ``exotic_arguments``
+
+* ``exotic_dukfunc``
+
+* ``exotic_proxyobj``
+
+* ``internal_prototype``
+
+* ``property_table``
+
+* ``entry_size``
+
+* ``entry_next``
+
+* ``array_size``
+
+* ``hash_size``
+
+Native functions:
+
+* ``c_function``
+
+* ``nargs``
+
+* ``magic``
+
+Ecmascript functions:
+
+* ``data``
+
+* ``nregs``
+
+* ``nargs``
+
+* ``start_line``
+
+* ``end_line``
+
+Threads:
+
+* FIXME: a lot of flags like "strict", interrupt counter values, etc.
+  Also, summarize value stack values here? Should value stack be
+  inspectable?
+
+Bufferobjects, FIXME:
+
+* ``underlying_buffer``
+
+* ``slice_byte_offset``
+
+* ``slice_byte_length``
+
+* ``elem_shift``
+
+* ``elem_type``
+
+* ``is_view``
+
 "debugger" statement
 ====================
 
