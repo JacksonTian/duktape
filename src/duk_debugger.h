@@ -41,6 +41,10 @@
 #define DUK_DBG_CMD_DETACH        0x1f
 #define DUK_DBG_CMD_DUMPHEAP      0x20
 #define DUK_DBG_CMD_GETBYTECODE   0x21
+#define DUK_DBG_CMD_INSPECTHEAPOBJECT 0x22
+
+/* FIXME: propflags */
+#define DUK_DBG_PROPFLAG_ARTIFICIAL  0x100
 
 #if defined(DUK_USE_DEBUGGER_SUPPORT)
 DUK_INTERNAL_DECL void duk_debug_do_detach(duk_heap *heap);
@@ -64,6 +68,7 @@ DUK_INTERNAL_DECL void duk_debug_write_bytes(duk_hthread *thr, const duk_uint8_t
 DUK_INTERNAL_DECL void duk_debug_write_byte(duk_hthread *thr, duk_uint8_t x);
 DUK_INTERNAL_DECL void duk_debug_write_unused(duk_hthread *thr);
 DUK_INTERNAL_DECL void duk_debug_write_undefined(duk_hthread *thr);
+DUK_INTERNAL_DECL void duk_debug_write_null(duk_hthread *thr);
 DUK_INTERNAL_DECL void duk_debug_write_int(duk_hthread *thr, duk_int32_t x);
 DUK_INTERNAL_DECL void duk_debug_write_uint(duk_hthread *thr, duk_uint32_t x);
 DUK_INTERNAL_DECL void duk_debug_write_string(duk_hthread *thr, const char *data, duk_size_t length);
@@ -77,6 +82,7 @@ DUK_INTERNAL_DECL void duk_debug_write_heapptr(duk_hthread *thr, duk_heaphdr *h)
 #endif
 DUK_INTERNAL_DECL void duk_debug_write_hobject(duk_hthread *thr, duk_hobject *obj);
 DUK_INTERNAL_DECL void duk_debug_write_tval(duk_hthread *thr, duk_tval *tv);
+/* FIXME: update with changes from InspectHeapObject */
 
 #if 0  /* unused */
 DUK_INTERNAL_DECL void duk_debug_write_request(duk_hthread *thr, duk_small_uint_t command);

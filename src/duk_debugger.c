@@ -405,6 +405,26 @@ DUK_LOCAL duk_double_t duk__debug_read_double_raw(duk_hthread *thr) {
 	return du.d;
 }
 
+DUK_INTERNAL duk_heaphdr *duk_debug_read_heapptr(duk_hthread *thr) {
+	duk_context *ctx = (duk_context *) thr;
+	duk_small_uint_t x;
+	duk_uint32_t len;
+
+	DUK_ASSERT(thr != NULL);
+
+	x = duk_debug_read_byte(thr);
+	if (x != 0x1e) {
+		goto fail;
+	}
+
+	return (duk_heaphdr *) duk__debug_read_pointer_raw(thr);
+
+ fail:
+	DUK_D(DUK_DPRINT("debug connection error: failed to decode heapptr"));
+	DUK__SET_CONN_BROKEN(thr, 1);
+	return NULL;
+}
+
 DUK_INTERNAL void duk_debug_read_tval(duk_hthread *thr) {
 	duk_context *ctx = (duk_context *) thr;
 	duk_uint8_t x;
@@ -582,6 +602,10 @@ DUK_INTERNAL void duk_debug_write_undefined(duk_hthread *thr) {
 	duk_debug_write_byte(thr, 0x16);
 }
 
+DUK_INTERNAL void duk_debug_write_null(duk_hthread *thr) {
+	duk_debug_write_byte(thr, 0x17);
+}
+
 /* Write signed 32-bit integer. */
 DUK_INTERNAL void duk_debug_write_int(duk_hthread *thr, duk_int32_t x) {
 	duk_uint8_t buf[5];
@@ -706,7 +730,7 @@ DUK_INTERNAL void duk_debug_write_pointer(duk_hthread *thr, void *ptr) {
 	duk__debug_write_pointer_raw(thr, ptr, 0x1c);
 }
 
-#if defined(DUK_USE_DEBUGGER_DUMPHEAP)
+#if defined(DUK_USE_DEBUGGER_DUMPHEAP)  /* FIXME: will also be needed by InspectHeapObject */
 DUK_INTERNAL void duk_debug_write_heapptr(duk_hthread *thr, duk_heaphdr *h) {
 	duk__debug_write_pointer_raw(thr, (void *) h, 0x1e);
 }
@@ -1036,11 +1060,7 @@ DUK_LOCAL void duk__debug_skip_to_eom(duk_hthread *thr) {
 }
 
 /*
- *  Process incoming debug requests
- *
- *  Individual request handlers can push temporaries on the value stack and
- *  rely on duk__debug_process_message() to restore the value stack top
- *  automatically.
+ *  Simple commands
  */
 
 DUK_LOCAL void duk__debug_handle_basic_info(duk_hthread *thr, duk_heap *heap) {
@@ -1448,6 +1468,10 @@ DUK_LOCAL void duk__debug_handle_detach(duk_hthread *thr, duk_heap *heap) {
 	DUK__SET_CONN_BROKEN(thr, 0);  /* not an error */
 }
 
+/*
+ *  DumpHeap command
+ */
+
 #if defined(DUK_USE_DEBUGGER_DUMPHEAP)
 DUK_LOCAL void duk__debug_dump_heaphdr(duk_hthread *thr, duk_heap *heap, duk_heaphdr *hdr) {
 	DUK_UNREF(heap);
@@ -1665,6 +1689,186 @@ DUK_LOCAL void duk__debug_handle_get_bytecode(duk_hthread *thr, duk_heap *heap) 
 	duk_debug_write_eom(thr);
 }
 
+/*
+ *  InspectHeapObject command
+ */
+
+/* FIXME: inspect will be relatively large so make optional like dumpheap? */
+/* FIXME: inspect will need a bunch of helpers, so use a separate code block */
+DUK_LOCAL void duk__debug_inspect_flags_key(duk_hthread *thr, duk_uint32_t flags, const char *key) {
+	duk_debug_write_uint(thr, flags);
+	duk_debug_write_cstring(thr, key);
+}
+
+DUK_LOCAL void duk__debug_inspect_prop_uint(duk_hthread *thr, duk_uint32_t flags, const char *key, duk_uint_t val) {
+	duk_debug_write_uint(thr, flags);
+	duk_debug_write_cstring(thr, key);
+	duk_debug_write_uint(thr, val);
+}
+
+DUK_LOCAL void duk__debug_handle_inspect_heap_object(duk_hthread *thr, duk_heap *heap) {
+	duk_heaphdr *h;
+	duk_small_uint_t htype;
+	duk_int32_t req_flags;
+	duk_uint_fast32_t i;
+
+	h = duk_debug_read_heapptr(thr);
+	if (!h) {
+		DUK_D(DUK_DPRINT("inspect target pointer is NULL (or invalid dvalue type)"));
+		goto fail_invalid;
+	}
+	req_flags = duk_debug_read_int(thr);
+
+	duk_debug_write_reply(thr);
+
+	/* We rely on the debug client providing a valid, non-stale pointer:
+	 * There's no portable way to safely validate the pointer here.
+	 *
+	 * We must iterate over the object without invoking garbage collection:
+	 * if garbage collection happened the object property table might be
+	 * reallocated and/or compacted.  This should not be an issue as long
+	 * as there are no coercions etc which might cause side effects.
+	 *
+	 * XXX: might want to prevent GC compaction here just in case.
+	 */
+
+	duk__debug_inspect_flags_key(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "heapptr");
+	duk_debug_write_heapptr(thr, h);
+
+	/* FIXME: comes out as signed now */
+	duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "heaphdr_flags", (duk_uint_t) DUK_HEAPHDR_GET_FLAGS(h));
+	duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "heaphdr_type", (duk_uint_t) DUK_HEAPHDR_GET_TYPE(h));
+#if defined(DUK_USE_REFERENCE_COUNTING)
+	duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "refcount", (duk_uint_t) DUK_HEAPHDR_GET_REFCOUNT(h));
+#endif
+
+	switch (DUK_HEAPHDR_GET_TYPE(h)) {
+	case DUK_HTYPE_STRING: {
+		DUK_D(DUK_DPRINT("inspect target pointer points to a string"));
+		goto fail_invalid;  /* FIXME: not yet implemented */
+	}
+	case DUK_HTYPE_OBJECT: {
+		duk_hobject *h_obj;
+		duk_hobject *h_proto;
+
+		DUK_D(DUK_DPRINT("inspect target pointer points to an object"));
+
+		h_obj = (duk_hobject *) h;
+		h_proto = DUK_HOBJECT_GET_PROTOTYPE(heap, h_obj);
+
+		/* FIXME: dump object specific fields */
+		duk__debug_inspect_flags_key(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "internal_prototype");
+		if (h_proto != NULL) {
+			duk_debug_write_hobject(thr, h_proto);
+		} else {
+			duk_debug_write_null(thr);
+		}
+		duk__debug_inspect_flags_key(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "props");
+		duk_debug_write_pointer(thr, (void *) DUK_HOBJECT_GET_PROPS(heap, h_obj));
+		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "e_size", (duk_uint_t) DUK_HOBJECT_GET_ESIZE(h_obj));
+		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "e_next", (duk_uint_t) DUK_HOBJECT_GET_ENEXT(h_obj));
+		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "a_size", (duk_uint_t) DUK_HOBJECT_GET_ASIZE(h_obj));
+		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "h_size", (duk_uint_t) DUK_HOBJECT_GET_HSIZE(h_obj));
+
+		if (DUK_HOBJECT_IS_NATIVEFUNCTION(h_obj)) {
+			/* FIXME */
+		}
+
+		if (DUK_HOBJECT_IS_COMPILEDFUNCTION(h_obj)) {
+			/* FIXME */
+		}
+
+		if (DUK_HOBJECT_IS_THREAD(h_obj)) {
+			/* FIXME */
+		}
+
+		if (DUK_HOBJECT_IS_BUFFEROBJECT(h_obj)) {
+			/* FIXME */
+			duk_hbufferobject *h_bufobj;
+			h_bufobj = (duk_hbufferobject *) h_obj;
+			/* FIXME: underlying buffer; heap reference */
+			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "slice_byte_offset", h_bufobj->offset);
+			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "slice_byte_length", h_bufobj->length);
+			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "elem_shift", (duk_uint_t) h_bufobj->shift);
+			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "elem_type", (duk_uint_t) h_bufobj->elem_type);
+			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "is_view", (duk_uint_t) h_bufobj->is_view);  /* FIXME: bool */
+		}
+
+		/* Property table: entry part. */
+		for (i = 0; i < (duk_uint_fast32_t) DUK_HOBJECT_GET_ENEXT(h_obj); i++) {
+			duk_hstring *key;
+			duk_uint32_t prop_flags;
+
+			key = DUK_HOBJECT_E_GET_KEY(heap, h_obj, i);
+			if (!key) {
+				continue;
+			}
+
+			/* Property flags: matches duk_hobject attribute flags. */
+			prop_flags = DUK_HOBJECT_E_GET_FLAGS(heap, h_obj, i);
+			duk_debug_write_uint(thr, prop_flags);
+
+			/* Property key. */
+			duk_debug_write_hstring(thr, key);
+
+			/* Property value, format different for data and accessor properties. */
+			if (DUK_HOBJECT_E_SLOT_IS_ACCESSOR(heap, h_obj, i)) {
+				duk_debug_write_hobject(thr, DUK_HOBJECT_E_GET_VALUE_GETTER(heap, h_obj, i));
+				duk_debug_write_hobject(thr, DUK_HOBJECT_E_GET_VALUE_SETTER(heap, h_obj, i));
+			} else {
+				duk_debug_write_tval(thr, DUK_HOBJECT_E_GET_VALUE_TVAL_PTR(heap, h_obj, i));
+			}
+		}
+
+		/* Property table: array part. */
+		for (i = 0; i < (duk_uint_fast32_t) DUK_HOBJECT_GET_ASIZE(h_obj); i++) {
+			duk_tval *tv;
+
+			tv = DUK_HOBJECT_A_GET_VALUE_PTR(heap, h_obj, i);
+			if (DUK_TVAL_IS_UNUSED(tv)) {
+				continue;
+			}
+
+			/* Property flags: implicit for array part. */
+			duk_debug_write_uint(thr, DUK_PROPDESC_FLAGS_WEC);  /* FIXME: indicate array part status using a flag? */
+
+			/* Property key: use integer instead of string for array part,
+			 * indicates array part status explicitly and avoids memory
+			 * churn.
+			 */
+			duk_debug_write_uint(thr, (duk_uint32_t) i);
+
+			duk_debug_write_tval(thr, tv);
+		}
+
+		break;
+	}
+	case DUK_HTYPE_BUFFER: {
+		DUK_D(DUK_DPRINT("inspect target pointer points to a (plain) buffer"));
+		goto fail_invalid;  /* FIXME: not yet implemented */
+	}
+	default: {
+		DUK_D(DUK_DPRINT("inspect target pointer has invalid heaphdr type"));
+		/* FIXME: check this beforehand, shouldn't fail here anymore */
+		goto fail_invalid;
+	}
+	}
+
+	duk_debug_write_eom(thr);
+	return;
+
+ fail_invalid:
+	duk_debug_write_error_eom(thr, DUK_DBG_ERR_UNKNOWN, "invalid heapptr");
+}
+
+/*
+ *  Process incoming debug requests
+ *
+ *  Individual request handlers can push temporaries on the value stack and
+ *  rely on duk__debug_process_message() to restore the value stack top
+ *  automatically.
+ */
+
 /* Process one debug message.  Automatically restore value stack top to its
  * entry value, so that individual message handlers don't need exact value
  * stack handling which is convenient.
@@ -1760,6 +1964,10 @@ DUK_LOCAL void duk__debug_process_message(duk_hthread *thr) {
 			duk__debug_handle_get_bytecode(thr, heap);
 			break;
 		}
+		case DUK_DBG_CMD_INSPECTHEAPOBJECT: {
+			duk__debug_handle_inspect_heap_object(thr, heap);
+			break;
+		}
 		default: {
 			DUK_D(DUK_DPRINT("debug command unsupported: %d", (int) cmd));
 			duk_debug_write_error_eom(thr, DUK_DBG_ERR_UNSUPPORTED, "unsupported command");
@@ -1795,75 +2003,6 @@ DUK_LOCAL void duk__debug_process_message(duk_hthread *thr) {
 	duk_set_top(ctx, entry_top);
 	DUK__SET_CONN_BROKEN(thr, 1);
 	return;
-}
-
-/* Halt execution and enter a debugger message loop until execution is resumed
- * by the client.  PC for the current activation may be temporarily decremented
- * so that the "current" instruction will be shown by the client.  This helper
- * is callable from anywhere, also outside bytecode executor.
- */
-
-DUK_INTERNAL void duk_debug_halt_execution(duk_hthread *thr, duk_bool_t use_prev_pc) {
-	duk_activation *act;
-	duk_hcompiledfunction *fun;
-	duk_instr_t *old_pc = NULL;
-
-	DUK_ASSERT(thr != NULL);
-	DUK_ASSERT(thr->heap != NULL);
-	DUK_ASSERT(DUK_HEAP_IS_DEBUGGER_ATTACHED(thr->heap));
-	DUK_ASSERT(thr->heap->dbg_processing == 0);
-
-	DUK_HEAP_SET_PAUSED(thr->heap);
-
-	act = duk_hthread_get_current_activation(thr);
-
-	/* NOTE: act may be NULL if an error is thrown outside of any activation,
-	 * which may happen in the case of, e.g. syntax errors.
-	 */
-
-	/* Decrement PC if that was requested, this requires a PC sync. */
-	if (act != NULL) {
-		duk_hthread_sync_currpc(thr);
-		old_pc = act->curr_pc;
-		fun = (duk_hcompiledfunction *) DUK_ACT_GET_FUNC(act);
-
-		/* Short circuit if is safe: if act->curr_pc != NULL, 'fun' is
-		 * guaranteed to be a non-NULL Ecmascript function.
-		 */
-		DUK_ASSERT(act->curr_pc == NULL ||
-		           (fun != NULL && DUK_HOBJECT_IS_COMPILEDFUNCTION((duk_hobject *) fun)));
-		if (use_prev_pc &&
-		    act->curr_pc != NULL &&
-		    act->curr_pc > DUK_HCOMPILEDFUNCTION_GET_CODE_BASE(thr->heap, fun)) {
-			act->curr_pc--;
-		}
-	}
-
-	/* Process debug messages until we are no longer paused. */
-
-	/* NOTE: This is a bit fragile. It's important to ensure that neither
-	 * duk_debug_send_status() or duk_debug_process_messages() throws an
-	 * error or act->curr_pc will never be reset.
-	 */
-
-	thr->heap->dbg_processing = 1;
-	duk_debug_send_status(thr);
-	while (thr->heap->dbg_paused) {
-		DUK_ASSERT(thr->heap->dbg_processing);
-		duk_debug_process_messages(thr, 0 /*no_block*/);
-	}
-	thr->heap->dbg_processing = 0;
-
-	/* XXX: Decrementing and restoring act->curr_pc works now, but if the
-	 * debugger message loop gains the ability to adjust the current PC
-	 * (e.g. a forced jump) restoring the PC here will break.  Another
-	 * approach would be to use a state flag for the "decrement 1 from
-	 * topmost activation's PC" and take it into account whenever dealing
-	 * with PC values.
-	 */
-	if (act != NULL) {
-		act->curr_pc = old_pc;  /* restore PC */
-	}
 }
 
 DUK_INTERNAL duk_bool_t duk_debug_process_messages(duk_hthread *thr, duk_bool_t no_block) {
@@ -1937,6 +2076,79 @@ DUK_INTERNAL duk_bool_t duk_debug_process_messages(duk_hthread *thr, duk_bool_t 
 #endif
 
 	return retval;
+}
+
+/*
+ *  Halt execution helper
+ */
+
+/* Halt execution and enter a debugger message loop until execution is resumed
+ * by the client.  PC for the current activation may be temporarily decremented
+ * so that the "current" instruction will be shown by the client.  This helper
+ * is callable from anywhere, also outside bytecode executor.
+ */
+
+DUK_INTERNAL void duk_debug_halt_execution(duk_hthread *thr, duk_bool_t use_prev_pc) {
+	duk_activation *act;
+	duk_hcompiledfunction *fun;
+	duk_instr_t *old_pc = NULL;
+
+	DUK_ASSERT(thr != NULL);
+	DUK_ASSERT(thr->heap != NULL);
+	DUK_ASSERT(DUK_HEAP_IS_DEBUGGER_ATTACHED(thr->heap));
+	DUK_ASSERT(thr->heap->dbg_processing == 0);
+
+	DUK_HEAP_SET_PAUSED(thr->heap);
+
+	act = duk_hthread_get_current_activation(thr);
+
+	/* NOTE: act may be NULL if an error is thrown outside of any activation,
+	 * which may happen in the case of, e.g. syntax errors.
+	 */
+
+	/* Decrement PC if that was requested, this requires a PC sync. */
+	if (act != NULL) {
+		duk_hthread_sync_currpc(thr);
+		old_pc = act->curr_pc;
+		fun = (duk_hcompiledfunction *) DUK_ACT_GET_FUNC(act);
+
+		/* Short circuit if is safe: if act->curr_pc != NULL, 'fun' is
+		 * guaranteed to be a non-NULL Ecmascript function.
+		 */
+		DUK_ASSERT(act->curr_pc == NULL ||
+		           (fun != NULL && DUK_HOBJECT_IS_COMPILEDFUNCTION((duk_hobject *) fun)));
+		if (use_prev_pc &&
+		    act->curr_pc != NULL &&
+		    act->curr_pc > DUK_HCOMPILEDFUNCTION_GET_CODE_BASE(thr->heap, fun)) {
+			act->curr_pc--;
+		}
+	}
+
+	/* Process debug messages until we are no longer paused. */
+
+	/* NOTE: This is a bit fragile. It's important to ensure that neither
+	 * duk_debug_send_status() or duk_debug_process_messages() throws an
+	 * error or act->curr_pc will never be reset.
+	 */
+
+	thr->heap->dbg_processing = 1;
+	duk_debug_send_status(thr);
+	while (thr->heap->dbg_paused) {
+		DUK_ASSERT(thr->heap->dbg_processing);
+		duk_debug_process_messages(thr, 0 /*no_block*/);
+	}
+	thr->heap->dbg_processing = 0;
+
+	/* XXX: Decrementing and restoring act->curr_pc works now, but if the
+	 * debugger message loop gains the ability to adjust the current PC
+	 * (e.g. a forced jump) restoring the PC here will break.  Another
+	 * approach would be to use a state flag for the "decrement 1 from
+	 * topmost activation's PC" and take it into account whenever dealing
+	 * with PC values.
+	 */
+	if (act != NULL) {
+		act->curr_pc = old_pc;  /* restore PC */
+	}
 }
 
 /*
