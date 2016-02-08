@@ -406,9 +406,7 @@ DUK_LOCAL duk_double_t duk__debug_read_double_raw(duk_hthread *thr) {
 }
 
 DUK_INTERNAL duk_heaphdr *duk_debug_read_heapptr(duk_hthread *thr) {
-	duk_context *ctx = (duk_context *) thr;
 	duk_small_uint_t x;
-	duk_uint32_t len;
 
 	DUK_ASSERT(thr != NULL);
 
@@ -730,11 +728,11 @@ DUK_INTERNAL void duk_debug_write_pointer(duk_hthread *thr, void *ptr) {
 	duk__debug_write_pointer_raw(thr, ptr, 0x1c);
 }
 
-#if defined(DUK_USE_DEBUGGER_DUMPHEAP)  /* FIXME: will also be needed by InspectHeapObject */
+#if defined(DUK_USE_DEBUGGER_DUMPHEAP) || defined(DUK_USE_DEBUGGER_INSPECT)
 DUK_INTERNAL void duk_debug_write_heapptr(duk_hthread *thr, duk_heaphdr *h) {
 	duk__debug_write_pointer_raw(thr, (void *) h, 0x1e);
 }
-#endif  /* DUK_USE_DEBUGGER_DUMPHEAP */
+#endif  /* DUK_USE_DEBUGGER_DUMPHEAP || DUK_USE_DEBUGGER_INSPECT */
 
 DUK_INTERNAL void duk_debug_write_hobject(duk_hthread *thr, duk_hobject *obj) {
 	duk_uint8_t buf[3];
@@ -1473,6 +1471,9 @@ DUK_LOCAL void duk__debug_handle_detach(duk_hthread *thr, duk_heap *heap) {
  */
 
 #if defined(DUK_USE_DEBUGGER_DUMPHEAP)
+/* FIXME: this has some overlap with InspectHeapObject; remove this and make
+ * DumpHeap return lists of heapptrs instead?
+ */
 DUK_LOCAL void duk__debug_dump_heaphdr(duk_hthread *thr, duk_heap *heap, duk_heaphdr *hdr) {
 	DUK_UNREF(heap);
 
@@ -1693,22 +1694,32 @@ DUK_LOCAL void duk__debug_handle_get_bytecode(duk_hthread *thr, duk_heap *heap) 
  *  InspectHeapObject command
  */
 
-/* FIXME: inspect will be relatively large so make optional like dumpheap? */
-/* FIXME: inspect will need a bunch of helpers, so use a separate code block */
-DUK_LOCAL void duk__debug_inspect_flags_key(duk_hthread *thr, duk_uint32_t flags, const char *key) {
-	duk_debug_write_uint(thr, flags);
+#if defined(DUK_USE_DEBUGGER_INSPECT)
+DUK_LOCAL void duk__debug_inspect_flags_key(duk_hthread *thr, const char *key) {
+	duk_debug_write_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL);
 	duk_debug_write_cstring(thr, key);
 }
 
-DUK_LOCAL void duk__debug_inspect_prop_uint(duk_hthread *thr, duk_uint32_t flags, const char *key, duk_uint_t val) {
-	duk_debug_write_uint(thr, flags);
+DUK_LOCAL void duk__debug_inspect_prop_uint(duk_hthread *thr, const char *key, duk_uint_t val) {
+	duk_debug_write_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL);
 	duk_debug_write_cstring(thr, key);
 	duk_debug_write_uint(thr, val);
 }
 
+DUK_LOCAL void duk__debug_inspect_prop_int(duk_hthread *thr, const char *key, duk_int_t val) {
+	duk_debug_write_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL);
+	duk_debug_write_cstring(thr, key);
+	duk_debug_write_int(thr, val);
+}
+
+DUK_LOCAL void duk__debug_inspect_prop_bool(duk_hthread *thr, const char *key, duk_bool_t val) {
+	duk_debug_write_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL);
+	duk_debug_write_cstring(thr, key);
+	duk_debug_write_uint(thr, val);  /* FIXME: bool writer */
+}
+
 DUK_LOCAL void duk__debug_handle_inspect_heap_object(duk_hthread *thr, duk_heap *heap) {
 	duk_heaphdr *h;
-	duk_small_uint_t htype;
 	duk_int32_t req_flags;
 	duk_uint_fast32_t i;
 
@@ -1732,15 +1743,20 @@ DUK_LOCAL void duk__debug_handle_inspect_heap_object(duk_hthread *thr, duk_heap 
 	 * XXX: might want to prevent GC compaction here just in case.
 	 */
 
-	duk__debug_inspect_flags_key(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "heapptr");
+	duk__debug_inspect_flags_key(thr, "heapptr");
 	duk_debug_write_heapptr(thr, h);
 
 	/* FIXME: comes out as signed now */
-	duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "heaphdr_flags", (duk_uint_t) DUK_HEAPHDR_GET_FLAGS(h));
-	duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "heaphdr_type", (duk_uint_t) DUK_HEAPHDR_GET_TYPE(h));
+	duk__debug_inspect_prop_uint(thr, "heaphdr_flags", (duk_uint_t) DUK_HEAPHDR_GET_FLAGS(h));
+	duk__debug_inspect_prop_uint(thr, "heaphdr_type", (duk_uint_t) DUK_HEAPHDR_GET_TYPE(h));
 #if defined(DUK_USE_REFERENCE_COUNTING)
-	duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "refcount", (duk_uint_t) DUK_HEAPHDR_GET_REFCOUNT(h));
+	duk__debug_inspect_prop_uint(thr, "refcount", (duk_uint_t) DUK_HEAPHDR_GET_REFCOUNT(h));
 #endif
+	duk__debug_inspect_prop_bool(thr, "reachable", DUK_HEAPHDR_HAS_REACHABLE(h));
+	duk__debug_inspect_prop_bool(thr, "temproot", DUK_HEAPHDR_HAS_TEMPROOT(h));
+	duk__debug_inspect_prop_bool(thr, "finalizable", DUK_HEAPHDR_HAS_FINALIZABLE(h));
+	duk__debug_inspect_prop_bool(thr, "finalized", DUK_HEAPHDR_HAS_FINALIZED(h));
+	duk__debug_inspect_prop_bool(thr, "readonly", DUK_HEAPHDR_HAS_READONLY(h));
 
 	switch (DUK_HEAPHDR_GET_TYPE(h)) {
 	case DUK_HTYPE_STRING: {
@@ -1756,30 +1772,46 @@ DUK_LOCAL void duk__debug_handle_inspect_heap_object(duk_hthread *thr, duk_heap 
 		h_obj = (duk_hobject *) h;
 		h_proto = DUK_HOBJECT_GET_PROTOTYPE(heap, h_obj);
 
-		/* FIXME: dump object specific fields */
-		duk__debug_inspect_flags_key(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "internal_prototype");
+		/* duk_hobject specific fields. */
+		duk__debug_inspect_flags_key(thr, "internal_prototype");
 		if (h_proto != NULL) {
 			duk_debug_write_hobject(thr, h_proto);
 		} else {
 			duk_debug_write_null(thr);
 		}
-		duk__debug_inspect_flags_key(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "props");
+		duk__debug_inspect_flags_key(thr, "props");
 		duk_debug_write_pointer(thr, (void *) DUK_HOBJECT_GET_PROPS(heap, h_obj));
-		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "e_size", (duk_uint_t) DUK_HOBJECT_GET_ESIZE(h_obj));
-		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "e_next", (duk_uint_t) DUK_HOBJECT_GET_ENEXT(h_obj));
-		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "a_size", (duk_uint_t) DUK_HOBJECT_GET_ASIZE(h_obj));
-		duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "h_size", (duk_uint_t) DUK_HOBJECT_GET_HSIZE(h_obj));
+		duk__debug_inspect_prop_uint(thr, "e_size", (duk_uint_t) DUK_HOBJECT_GET_ESIZE(h_obj));
+		duk__debug_inspect_prop_uint(thr, "e_next", (duk_uint_t) DUK_HOBJECT_GET_ENEXT(h_obj));
+		duk__debug_inspect_prop_uint(thr, "a_size", (duk_uint_t) DUK_HOBJECT_GET_ASIZE(h_obj));
+		duk__debug_inspect_prop_uint(thr, "h_size", (duk_uint_t) DUK_HOBJECT_GET_HSIZE(h_obj));
 
+		/* duk_hnativefunction specific fields. */
 		if (DUK_HOBJECT_IS_NATIVEFUNCTION(h_obj)) {
-			/* FIXME */
+			duk_hnativefunction *h_fun;
+			h_fun = (duk_hnativefunction *) h_obj;
+			/* FIXME: native function pointer: include in some form? */
+			duk__debug_inspect_prop_int(thr, "nargs", h_fun->nargs);
+			duk__debug_inspect_prop_int(thr, "magic", h_fun->magic);
+			duk__debug_inspect_prop_bool(thr, "varargs", h_fun->magic == DUK_HNATIVEFUNCTION_NARGS_VARARGS);
 		}
 
 		if (DUK_HOBJECT_IS_COMPILEDFUNCTION(h_obj)) {
-			/* FIXME */
+			duk_hcompiledfunction *h_fun;
+			h_fun = (duk_hcompiledfunction *) h_obj;
+			/* FIXME: 'data' */
+			duk__debug_inspect_prop_int(thr, "nregs", h_fun->nregs);
+			duk__debug_inspect_prop_int(thr, "nargs", h_fun->nargs);
+			duk__debug_inspect_prop_uint(thr, "start_line", h_fun->start_line);
+			duk__debug_inspect_prop_uint(thr, "end_line", h_fun->end_line);
 		}
 
 		if (DUK_HOBJECT_IS_THREAD(h_obj)) {
-			/* FIXME */
+			duk_hthread *h_thr;
+			h_thr = (duk_hthread *) h_obj;
+			/* FIXME: value stacks, activations etc, it'd be nice to inspect them
+			 * but how?
+			 */
 		}
 
 		if (DUK_HOBJECT_IS_BUFFEROBJECT(h_obj)) {
@@ -1787,11 +1819,11 @@ DUK_LOCAL void duk__debug_handle_inspect_heap_object(duk_hthread *thr, duk_heap 
 			duk_hbufferobject *h_bufobj;
 			h_bufobj = (duk_hbufferobject *) h_obj;
 			/* FIXME: underlying buffer; heap reference */
-			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "slice_byte_offset", h_bufobj->offset);
-			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "slice_byte_length", h_bufobj->length);
-			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "elem_shift", (duk_uint_t) h_bufobj->shift);
-			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "elem_type", (duk_uint_t) h_bufobj->elem_type);
-			duk__debug_inspect_prop_uint(thr, DUK_DBG_PROPFLAG_ARTIFICIAL, "is_view", (duk_uint_t) h_bufobj->is_view);  /* FIXME: bool */
+			duk__debug_inspect_prop_uint(thr, "slice_byte_offset", h_bufobj->offset);
+			duk__debug_inspect_prop_uint(thr, "slice_byte_length", h_bufobj->length);
+			duk__debug_inspect_prop_uint(thr, "elem_shift", (duk_uint_t) h_bufobj->shift);
+			duk__debug_inspect_prop_uint(thr, "elem_type", (duk_uint_t) h_bufobj->elem_type);
+			duk__debug_inspect_prop_bool(thr, "is_view", (duk_uint_t) h_bufobj->is_view);
 		}
 
 		/* Property table: entry part. */
@@ -1860,6 +1892,7 @@ DUK_LOCAL void duk__debug_handle_inspect_heap_object(duk_hthread *thr, duk_heap 
  fail_invalid:
 	duk_debug_write_error_eom(thr, DUK_DBG_ERR_UNKNOWN, "invalid heapptr");
 }
+#endif  /* DUK_USE_DEBUGGER_INSPECT */
 
 /*
  *  Process incoming debug requests
@@ -1964,10 +1997,12 @@ DUK_LOCAL void duk__debug_process_message(duk_hthread *thr) {
 			duk__debug_handle_get_bytecode(thr, heap);
 			break;
 		}
+#if defined(DUK_USE_DEBUGGER_INSPECT)
 		case DUK_DBG_CMD_INSPECTHEAPOBJECT: {
 			duk__debug_handle_inspect_heap_object(thr, heap);
 			break;
 		}
+#endif  /* DUK_USE_DEBUGGER_INSPECT */
 		default: {
 			DUK_D(DUK_DPRINT("debug command unsupported: %d", (int) cmd));
 			duk_debug_write_error_eom(thr, DUK_DBG_ERR_UNSUPPORTED, "unsupported command");
